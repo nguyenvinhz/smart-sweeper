@@ -12,7 +12,30 @@ class AlphaBetaAgent(Algorithm):
 
     # Vòng lặp giải chính tìm kiếm ô an toàn/ô mìn thông qua cắt tỉa giả định.
     def _solve(self):
+        # Nước đi đầu tiên: luôn mở ô trung tâm để đảm bảo an toàn
+        center_r = self.board.rows // 2
+        center_c = self.board.cols // 2
+        if self.do_reveal(center_r, center_c) == -1:
+            return
+
+        last_revealed = -1
+        last_flagged = -1
+
         while not self.board.is_complete() and self.metrics['mines_hit'] == 0:
+            current_revealed = len(self.board.revealed)
+            current_flagged = len(self.board.flagged)
+            if current_revealed == last_revealed and current_flagged == last_flagged:
+                break
+            last_revealed = current_revealed
+            last_flagged = current_flagged
+
+            # Áp dụng các luật logic cơ bản (nhất quán) từ lớp cơ sở
+            progress_made = True
+            while progress_made:
+                progress_made = self.apply_basic_rules()
+                if self.board.is_complete() or self.metrics['mines_hit'] > 0:
+                    return
+
             border_cells = set()
             numbers = {}
             for r in range(self.board.rows):
@@ -28,30 +51,41 @@ class AlphaBetaAgent(Algorithm):
                                 
             border_cells = list(border_cells)
             
-            progress_made = self._apply_basic_rules(numbers)
-            if progress_made:
-                continue
-
             if not border_cells:
                 self._open_random()
                 continue
 
+            # Phân tách thành các cụm độc lập
+            components = self._partition_border_cells(border_cells, numbers)
+            
             safe_cells = []
             mine_cells = []
+            undetermined_cells = []
 
-            for cell in border_cells:
-                self.metrics['nodes_explored'] += 1
-                
-                can_be_mine = self._exists_valid_config_with_assumption(border_cells, numbers, {cell: True})
-                
-                if not can_be_mine:
-                    safe_cells.append(cell)
-                    continue
-                
-                can_be_safe = self._exists_valid_config_with_assumption(border_cells, numbers, {cell: False})
-                
-                if not can_be_safe:
-                    mine_cells.append(cell)
+            for comp in components:
+                comp_set = set(comp)
+                comp_numbers = {pos: val for pos, val in numbers.items()
+                                if any(n in comp_set for n in self.board.get_neighbors(*pos))}
+
+                for cell in comp:
+                    self.metrics['nodes_explored'] += 1
+                    
+                    # Giả định cell là MÌN, xem có cấu hình nào hợp lệ không.
+                    # Nếu KHÔNG có cấu hình hợp lệ nào tồn tại khi cell là MÌN, thì cell chắc chắn AN TOÀN!
+                    can_be_mine = self._exists_valid_config_with_assumption(comp, comp_numbers, {cell: True})
+                    
+                    if not can_be_mine:
+                        safe_cells.append(cell)
+                        continue
+                    
+                    # Giả định cell là AN TOÀN, xem có cấu hình nào hợp lệ không.
+                    # Nếu KHÔNG có cấu hình hợp lệ nào tồn tại khi cell là AN TOÀN, thì cell chắc chắn là MÌN!
+                    can_be_safe = self._exists_valid_config_with_assumption(comp, comp_numbers, {cell: False})
+                    
+                    if not can_be_safe:
+                        mine_cells.append(cell)
+                    else:
+                        undetermined_cells.append(cell)
 
             if mine_cells:
                 for mc in mine_cells:
@@ -60,40 +94,84 @@ class AlphaBetaAgent(Algorithm):
                 for sc in safe_cells:
                     if self.do_reveal(*sc) == -1: return
             else:
-                r, c = random.choice(border_cells)
-                self.do_reveal(r, c)
+                # Nếu không tìm thấy nước đi chắc chắn nào, chọn ô có xác suất chứa mìn thấp nhất trong các ô biên
+                if undetermined_cells:
+                    best_cell = None
+                    best_prob = float('inf')
+                    for cell in undetermined_cells:
+                        prob = self.get_mine_probability(*cell)
+                        if prob < best_prob:
+                            best_prob = prob
+                            best_cell = cell
+                    
+                    if best_cell:
+                        if self.do_reveal(*best_cell) == -1: return
+                    else:
+                        self._open_random()
+                else:
+                    self._open_random()
 
-    # Áp dụng nhanh các quy tắc logic cơ bản để cắm cờ hoặc mở ô.
-    def _apply_basic_rules(self, numbers):
-        made_progress = False
-        for (r, c), remaining_mines in numbers.items():
-            hidden = self.board.get_neighbors(r, c, hidden_only=True)
-            if len(hidden) == remaining_mines and remaining_mines > 0:
-                for h in hidden:
-                    self.do_flag(*h)
-                    made_progress = True
-            elif remaining_mines == 0 and len(hidden) > 0:
-                for h in hidden:
-                    if self.do_reveal(*h) == -1: return True
-                    made_progress = True
-        return made_progress
+    # Phân chia các ô biên thành các cụm độc lập bằng Union-Find.
+    def _partition_border_cells(self, border_cells, numbers):
+        parent = {v: v for v in border_cells}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for (nr, nc), _ in numbers.items():
+            neighbors = [n for n in self.board.get_neighbors(nr, nc) if n in parent]
+            for i in range(1, len(neighbors)):
+                union(neighbors[0], neighbors[i])
+
+        groups = {}
+        for v in border_cells:
+            root = find(v)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(v)
+
+        return list(groups.values())
 
     # Kiểm tra xem có tồn tại bất kỳ cấu hình mìn hợp lệ nào thỏa mãn giả định đưa ra hay không.
     def _exists_valid_config_with_assumption(self, border_cells, numbers, assumptions):
+        node_limit = 2000
+        self._nodes_in_comp = 0
+        self._limit_exceeded = False
+        
         def backtrack(index, current_mines, current_safes):
+            if self._limit_exceeded:
+                return False
+
+            self._nodes_in_comp += 1
             self.metrics['nodes_explored'] += 1
+            if self._nodes_in_comp > node_limit:
+                self._limit_exceeded = True
+                return False
+
             if index == len(border_cells):
                 return self._is_valid_config(current_mines, numbers)
 
             cell = border_cells[index]
             must_be_mine = assumptions.get(cell, None)
             
+            # Cắt tỉa alpha-beta sớm bằng cách dừng ngay khi tìm được cấu hình hợp lệ đầu tiên
             if must_be_mine is not False:
                 if self._can_place_mine(cell, current_mines, numbers):
                     current_mines.add(cell)
                     if backtrack(index + 1, current_mines, current_safes):
                         return True
                     current_mines.remove(cell)
+                    
+            if self._limit_exceeded:
+                return False
                     
             if must_be_mine is not True:
                 if self._can_place_safe(cell, current_mines, numbers, border_cells, index):
