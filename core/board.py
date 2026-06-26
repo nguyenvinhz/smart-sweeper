@@ -110,7 +110,7 @@ class Board:
     def get_neighbors(self, row, col, hidden_only=False):
         if hidden_only:
             return [(r, c) for r, c in self._get_neighbors(row, col)
-                    if (r, c) not in self.revealed]
+                    if (r, c) not in self.revealed and (r, c) not in self.flagged]
         return self._get_neighbors(row, col)
 
     # Lấy danh sách các ô lân cận chưa mở và không bị cắm cờ.
